@@ -51,8 +51,22 @@ async def handle_message(message: types.Message):
     except Exception as e:
         await status_msg.edit_text(f"عذراً، حدث خطأ أثناء التحميل: {str(e)}")
 
+from aiohttp import web
+
+async def health_check(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
     print("Bot is starting...")
+    
+    # Setup web server for Render health checks
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    asyncio.create_task(site.start())
+    
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
