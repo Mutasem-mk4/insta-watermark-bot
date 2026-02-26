@@ -1,113 +1,156 @@
 import os
 import asyncio
 import requests
+import re
+import uuid
+import instaloader
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, BufferedInputFile
 import yt_dlp
-import uuid
 
-# Token: Priority to Environment Variable, fallback to hardcoded (for local test)
 TOKEN = os.getenv('BOT_TOKEN', '8607432390:AAFCXj4h9XQ_VYQ2_7CCpNyg0IEP4ZR612k')
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# yt-dlp options for best quality, no watermark
-ydl_opts = {
-    'format': 'best',
-    'outtmpl': '%(id)s.%(ext)s',
-    'quiet': True,
-    'no_warnings': True,
-    'nocheckcertificate': True,
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
-        'Sec-Fetch-Mode': 'navigate',
-    }
-}
+# ── Shared instaloader context (reuse across requests) ─────────────────────────
+_loader = instaloader.Instaloader(
+    download_videos=False,        # we'll stream manually
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False,
+    quiet=True,
+)
 
-# If cookies.txt exists, use it
-if os.path.exists('cookies.txt'):
-    ydl_opts['cookiefile'] = 'cookies.txt'
+# If a session file exists (e.g. uploaded as env var) use it
+_SESSION = os.getenv("INSTALOADER_SESSION", "")
+if _SESSION:
+    import tempfile, base64
+    _sf = tempfile.NamedTemporaryFile(delete=False, suffix=".session")
+    _sf.write(base64.b64decode(_SESSION))
+    _sf.close()
+    try:
+        _loader.load_session_from_file("session", _sf.name)
+    except Exception:
+        pass
 
-async def download_with_cobalt(url):
-    """Fallback downloader using public Cobalt API instances."""
-    instances = [
-        "https://cobalt.canine.tools/api/json",
-        "https://cobalt.meowing.de/api/json",
-        "https://api.cobalt.tools/api/json"
-    ]
-    filename = f"{uuid.uuid4()}.mp4"
-    
-    for api_url in instances:
-        try:
-            payload = {"url": url}
-            headers = {"Accept": "application/json", "Content-Type": "application/json"}
-            response = requests.post(api_url, json=payload, headers=headers, timeout=20)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") in ["stream", "redirect"]:
-                    video_url = data.get("url")
-                    v_resp = requests.get(video_url, stream=True, timeout=30)
-                    if v_resp.status_code == 200:
-                        with open(filename, 'wb') as f:
-                            for chunk in v_resp.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                        return filename
-        except Exception:
-            continue
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _shortcode(url: str):
+    for pat in [r'instagram\.com/reel/([A-Za-z0-9_-]+)',
+                r'instagram\.com/p/([A-Za-z0-9_-]+)',
+                r'instagram\.com/tv/([A-Za-z0-9_-]+)']:
+        m = re.search(pat, url)
+        if m:
+            return m.group(1)
     return None
 
+async def _download_instaloader(url: str) -> str | None:
+    """Primary: use instaloader to get video_url then stream-download."""
+    sc = _shortcode(url)
+    if not sc:
+        return None
+    try:
+        post = instaloader.Post.from_shortcode(_loader.context, sc)
+        if not post.is_video:
+            return None
+        video_url = post.video_url       # direct CDN URL – no auth needed for public posts
+        fname = f"{uuid.uuid4()}.mp4"
+        resp = requests.get(video_url, stream=True, timeout=60)
+        resp.raise_for_status()
+        with open(fname, 'wb') as f:
+            for chunk in resp.iter_content(8192):
+                f.write(chunk)
+        return fname
+    except Exception as e:
+        print(f"[instaloader] failed: {e}")
+        return None
+
+async def _download_ytdlp(url: str) -> str | None:
+    """Fallback: yt-dlp."""
+    fname = f"{uuid.uuid4()}.mp4"
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': fname,
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        }
+    }
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            actual = ydl.prepare_filename(info)
+            return actual
+    except Exception as e:
+        print(f"[yt-dlp] failed: {e}")
+        return None
+
+# ── Handlers ───────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
 async def send_welcome(message: types.Message):
-    await message.reply("أهلاً بك! أرسل لي رابط فيديو/ريلز من الانستقرام وسأقوم بتحميله بدون علامة مائية وبأعلى جودة ⚡️")
+    await message.reply(
+        "أهلاً! 👋\nأرسل لي رابط ريلز أو فيديو من انستقرام وسأحمّله لك مباشرة بدون علامة مائية ⚡️"
+    )
 
 @dp.message()
 async def handle_message(message: types.Message):
-    url = message.text
+    url = (message.text or "").strip()
     if not url:
         return
-    
-    INSTAGRAM_DOMAINS = ('instagram.com', 'instagr.am', 'instagram')
-    if not any(domain in url.lower() for domain in INSTAGRAM_DOMAINS):
-        await message.reply("❌ الرابط غير مدعوم.\nأرسل لي رابط من الانستقرام مثل:\nhttps://www.instagram.com/reel/...")
-        return
-        
-    status_msg = await message.reply("جاري التحميل... ⏳")
-    filename = None
-    
-    try:
-        # Step 1: Try Primary (yt-dlp)
-        try:
-            temp_filename = f'{uuid.uuid4()}.mp4'
-            ydl_opts['outtmpl'] = temp_filename
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-        except Exception as e:
-            # Step 2: Try Fallback (Cobalt)
-            print(f"yt-dlp failed, trying Cobalt: {e}")
-            filename = await download_with_cobalt(url)
-            
-        if filename and os.path.exists(filename):
-            video = FSInputFile(filename)
-            await bot.send_video(chat_id=message.chat.id, video=video, caption="تم التحميل بواسطة البوت ⚡️")
-            os.remove(filename)
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text("❌ عذراً، لم أتمكن من تحميل الفيديو. قد يكون الحساب خاصاً أو هناك حظر مؤقت من انستقرام.")
-        
-    except Exception as e:
-        await status_msg.edit_text(f"عذراً، حدث خطأ أثناء التحميل: {str(e)}")
 
+    if not any(d in url.lower() for d in ('instagram.com', 'instagr.am')):
+        await message.reply("❌ أرسل رابط انستقرام مثل:\nhttps://www.instagram.com/reel/...")
+        return
+
+    status = await message.reply("⏳ جاري التحميل...")
+    filename = None
+
+    try:
+        # Layer 1: instaloader (fastest, most reliable for public posts)
+        filename = await _download_instaloader(url)
+
+        # Layer 2: yt-dlp fallback
+        if not filename or not os.path.exists(filename):
+            print("Trying yt-dlp fallback...")
+            filename = await _download_ytdlp(url)
+
+        if filename and os.path.exists(filename):
+            size = os.path.getsize(filename)
+            print(f"Sending {size} bytes")
+            video = FSInputFile(filename)
+            await bot.send_video(
+                chat_id=message.chat.id,
+                video=video,
+                caption="✅ تم التحميل بواسطة البوت ⚡️",
+            )
+            os.remove(filename)
+            await status.delete()
+        else:
+            await status.edit_text(
+                "❌ لم أتمكن من تحميل الفيديو.\n"
+                "تأكد أن الحساب عام وأن الرابط صحيح."
+            )
+    except Exception as e:
+        print(f"[handle_message] unexpected error: {e}")
+        await status.edit_text(f"❌ حدث خطأ: {str(e)}")
+    finally:
+        if filename and os.path.exists(filename):
+            os.remove(filename)
+
+# ── Web server for Render health-check ─────────────────────────────────────────
 from aiohttp import web
 
 async def health_check(request):
     return web.Response(text="Bot is running!")
 
 async def main():
-    print("Bot is starting...")
+    print("Bot starting...")
     app = web.Application()
     app.router.add_get("/", health_check)
     runner = web.AppRunner(app)
