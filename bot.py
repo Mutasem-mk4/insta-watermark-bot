@@ -26,7 +26,12 @@ async def send_welcome(message: types.Message):
 @dp.message()
 async def handle_message(message: types.Message):
     url = message.text
-    if 'instagram.com' not in url:
+    if not url:
+        return
+    
+    INSTAGRAM_DOMAINS = ('instagram.com', 'instagr.am', 'instagram')
+    if not any(domain in url for domain in INSTAGRAM_DOMAINS):
+        await message.reply("❌ الرابط غير مدعوم.\nأرسل لي رابط من الانستقرام مثل:\nhttps://www.instagram.com/reel/...")
         return
         
     status_msg = await message.reply("جاري التحميل... ⏳")
