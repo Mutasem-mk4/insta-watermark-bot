@@ -17,6 +17,13 @@ ydl_opts = {
     'outtmpl': '%(id)s.%(ext)s',
     'quiet': True,
     'no_warnings': True,
+    'nocheckcertificate': True,
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-us,en;q=0.5',
+        'Sec-Fetch-Mode': 'navigate',
+    }
 }
 
 @dp.message(Command("start"))
@@ -30,7 +37,7 @@ async def handle_message(message: types.Message):
         return
     
     INSTAGRAM_DOMAINS = ('instagram.com', 'instagr.am', 'instagram')
-    if not any(domain in url for domain in INSTAGRAM_DOMAINS):
+    if not any(domain in url.lower() for domain in INSTAGRAM_DOMAINS):
         await message.reply("❌ الرابط غير مدعوم.\nأرسل لي رابط من الانستقرام مثل:\nhttps://www.instagram.com/reel/...")
         return
         
