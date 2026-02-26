@@ -1,5 +1,6 @@
 import os
 import asyncio
+import requests
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
@@ -26,6 +27,38 @@ ydl_opts = {
     }
 }
 
+# If cookies.txt exists, use it
+if os.path.exists('cookies.txt'):
+    ydl_opts['cookiefile'] = 'cookies.txt'
+
+async def download_with_cobalt(url):
+    """Fallback downloader using public Cobalt API instances."""
+    instances = [
+        "https://cobalt.canine.tools/api/json",
+        "https://cobalt.meowing.de/api/json",
+        "https://api.cobalt.tools/api/json"
+    ]
+    filename = f"{uuid.uuid4()}.mp4"
+    
+    for api_url in instances:
+        try:
+            payload = {"url": url}
+            headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            response = requests.post(api_url, json=payload, headers=headers, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") in ["stream", "redirect"]:
+                    video_url = data.get("url")
+                    v_resp = requests.get(video_url, stream=True, timeout=30)
+                    if v_resp.status_code == 200:
+                        with open(filename, 'wb') as f:
+                            for chunk in v_resp.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        return filename
+        except Exception:
+            continue
+    return None
+
 @dp.message(Command("start"))
 async def send_welcome(message: types.Message):
     await message.reply("أهلاً بك! أرسل لي رابط فيديو/ريلز من الانستقرام وسأقوم بتحميله بدون علامة مائية وبأعلى جودة ⚡️")
@@ -42,23 +75,28 @@ async def handle_message(message: types.Message):
         return
         
     status_msg = await message.reply("جاري التحميل... ⏳")
+    filename = None
     
     try:
-        # Use yt-dlp to download the video
-        ydl_opts['outtmpl'] = f'{uuid.uuid4()}.mp4'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+        # Step 1: Try Primary (yt-dlp)
+        try:
+            temp_filename = f'{uuid.uuid4()}.mp4'
+            ydl_opts['outtmpl'] = temp_filename
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        except Exception as e:
+            # Step 2: Try Fallback (Cobalt)
+            print(f"yt-dlp failed, trying Cobalt: {e}")
+            filename = await download_with_cobalt(url)
             
-        # Send the video back
-        video = FSInputFile(filename)
-        await bot.send_video(chat_id=message.chat.id, video=video, caption="تم التحميل بواسطة البوت ⚡️")
-        
-        # Cleanup
-        if os.path.exists(filename):
+        if filename and os.path.exists(filename):
+            video = FSInputFile(filename)
+            await bot.send_video(chat_id=message.chat.id, video=video, caption="تم التحميل بواسطة البوت ⚡️")
             os.remove(filename)
-            
-        await status_msg.delete()
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ عذراً، لم أتمكن من تحميل الفيديو. قد يكون الحساب خاصاً أو هناك حظر مؤقت من انستقرام.")
         
     except Exception as e:
         await status_msg.edit_text(f"عذراً، حدث خطأ أثناء التحميل: {str(e)}")
@@ -70,15 +108,12 @@ async def health_check(request):
 
 async def main():
     print("Bot is starting...")
-    
-    # Setup web server for Render health checks
     app = web.Application()
     app.router.add_get("/", health_check)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
     asyncio.create_task(site.start())
-    
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
