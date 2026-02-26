@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: insta-watermark-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false # User must set this manually in Render dashboard or I can via API
+      - key: PORT
+        value: 8080
