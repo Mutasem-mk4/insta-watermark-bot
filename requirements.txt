@@ -2,5 +2,4 @@ aiogram
 yt-dlp
 aiohttp
 requests
-instaloader
 beautifulsoup4
