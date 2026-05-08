@@ -11,7 +11,7 @@
   "license": "ISC",
   "dependencies": {
     "@bochilteam/scraper": "^5.0.1",
-    "axios": "^1.13.5",
+    "axios": "^1.16.0",
     "instagram-url-direct": "^2.0.7",
     "node-telegram-bot-api": "^0.67.0"
   }
